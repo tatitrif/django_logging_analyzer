@@ -81,3 +81,12 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml", "-r"]
         exclude: "^tests/"
+
+  # Добавляем тестирование через pytest
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        types: [python]

@@ -4,32 +4,28 @@ import argparse
 import logging
 import re
 import sys
+import time
 from collections import defaultdict
 from collections.abc import Generator
 
+from coverage.annotate import os
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(filename)s:%(lineno)d - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+PADDING_COL = 4
 
 
-def read_files(file_paths: list[str]) -> Generator[str, None, None]:
+def read_file(file_path: str) -> Generator[str, None, None]:
     """Генератор для построчного чтения файлов с обработкой ошибок."""
-    for file_path in file_paths:
-        try:
-            with open(file_path, encoding="utf-8", errors="replace") as file:
-                logger.debug(f"Начато чтение файла: {file_path}")
-                yield from file
-                logger.debug(f"Файл полностью прочитан: {file_path}")
-        except FileNotFoundError:
-            logger.error(f"Файл не найден: {file_path}")
-        except PermissionError:
-            logger.error(f"Ошибка доступа к файлу: {file_path}")
-        except Exception as e:
-            logger.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
+    with open(file_path, encoding="utf-8", errors="replace") as file:
+        logger.debug(f"Начато чтение файла: {file_path}")
+        yield from file
+        logger.debug(f"Файл полностью прочитан: {file_path}")
 
 
 def parse_log_line(line: str, match_groups: tuple) -> dict | None:
@@ -44,23 +40,43 @@ def parse_log_line(line: str, match_groups: tuple) -> dict | None:
         return {group: match.group(group) for group in match_groups}
 
 
-def collect_statistics(
-    log_files: list[str], report_type: str
-) -> dict[str, dict[str, int]]:
-    """Собирает статистику из лог-файлов."""
-    stats = defaultdict(lambda: defaultdict(int))
+def process_file(file_path: str, report_type: str) -> dict[str, dict[str, int]]:
+    """
+    Обрабатывает один файл.
+
+    :return (dict) {endpoint: {INFO: 1, DEBUG: 1,...}, ...}
+    """
+    file_stats = defaultdict(lambda: defaultdict(int))
+
     if report_type == "handlers":
         match_group = ("endpoint", "log_level")
     else:
         logger.critical(f"Тип отчета '{report_type}' не реализован")
         sys.exit(1)
 
-    for line in read_files(log_files):
+    for line in read_file(file_path):
         if parsed := parse_log_line(line, match_group):
-            if report_type == "handlers":
-                stats[parsed["endpoint"]][parsed["log_level"]] += 1
+            file_stats[parsed["endpoint"]][parsed["log_level"]] += 1
 
-    return stats
+    return file_stats
+
+
+def collect_statistics(
+    log_files: list[str], report_type: str
+) -> dict[str, dict[str, int]]:
+    """
+    Собирает статистику из лог-файлов.
+
+    :return (dict) {endpoint: {INFO: 1, DEBUG: 1,...}, ...}
+    """
+    collect_stats = defaultdict(lambda: defaultdict(int))
+    for log_file in log_files:
+        file_stats = process_file(log_file, report_type)
+        for endpoint, values in file_stats.items():
+            for value, count in values.items():
+                collect_stats[endpoint][value] += count
+
+    return collect_stats
 
 
 def create_report(stats: dict[str, dict[str, int]]) -> list[str]:
@@ -101,17 +117,51 @@ def create_report(stats: dict[str, dict[str, int]]) -> list[str]:
 
     # Форматирование отчета с отступами
     formatted_rows = [
-        "".join(f"{cell:<{width + 4}}" for cell, width in zip(row, col_widths))
+        "".join(
+            f"{cell:<{width + PADDING_COL}}" for cell, width in zip(row, col_widths)
+        )
         for row in rows
     ]
 
     return [f"Total requests: {total}\n", *formatted_rows]
 
 
+class ValidateLogFilesAction(argparse.Action):
+    """Кастомное действие при валидации пути к файлам лога."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Вызывается, при запуске анализатора аргументов."""
+        valid_files = []
+        for file_path in values:
+            try:
+                with open(file_path):
+                    pass
+            except FileNotFoundError:
+                logger.error(f"Файл не найден: {file_path}")
+            except PermissionError:
+                logger.error(f"Ошибка доступа к файлу: {file_path}")
+            except Exception as e:
+                logger.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
+            else:
+                file_size = os.path.getsize(file_path)
+                if file_size > 0:
+                    valid_files.append(file_path)
+                else:
+                    logger.error(f"Файл пустой: {file_path}")
+        if len(valid_files) == 0:
+            parser.error("Нет файлов для создания отчета")
+        setattr(namespace, self.dest, valid_files)
+
+
 def parse_args_cli():
-    """Парсер аргументов командной строки."""
+    """Парсер аргументов командной строки с валидацией файлов."""
     parser = argparse.ArgumentParser(description="Анализатор логов Django")
-    parser.add_argument("log_files", nargs="+", help="Пути к файлам лога")
+    parser.add_argument(
+        "log_files",
+        nargs="+",
+        help="Пути к файлам лога",
+        action=ValidateLogFilesAction,
+    )
     parser.add_argument(
         "--report",
         choices=[
@@ -124,6 +174,20 @@ def parse_args_cli():
     return parser.parse_args()
 
 
+def measure_time(func):
+    """Декоратор измерения времени."""
+
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        end = time.perf_counter()
+        logger.debug(f"{func.__name__} выполнилась за {end - start:.4f} сек")
+        return result
+
+    return wrapper
+
+
+@measure_time
 def main():
     """Точка входа в приложение."""
     args = parse_args_cli()

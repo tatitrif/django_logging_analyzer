@@ -88,8 +88,28 @@ def test_parse_args_cli_with_relative_paths():
     with patch("sys.argv", ["main.py"] + test_args):
         args = main.parse_args_cli()
 
-        assert args.log_files == ["./logs/app1.log", "../app2.log"]
+        assert args.log_files == ["./logs/app1.log"]
+        assert args.log_files != ["../app2.log"]
         assert args.report == "handlers"
+
+
+@pytest.fixture
+def create_test_files(tmp_path):
+    """Фикстура для создания тестовых файлов."""
+    empty_file = tmp_path / "empty.log"
+    empty_file.write_text("")
+    return empty_file
+
+
+def test_empty_file(create_test_files, caplog):
+    """Тест с пустым файлом."""
+    empty_file = create_test_files
+
+    with patch("sys.argv", ["script.py", str(empty_file)]):
+        with pytest.raises(SystemExit):
+            main.parse_args_cli()
+
+    assert any("Файл пустой" in record.message for record in caplog.records)
 
 
 if __name__ == "__main__":
